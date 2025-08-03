@@ -65,8 +65,6 @@ class Residual_Block(nn.Module):
         return h + self.skip_connection(x) # Skip connection to add input to output
     
 
-
-
 class Attention_Block(nn.Module):
     def __init__(self, channels: int, num_heads: int = 1, num_groups: int = 32):
         super().__init__()
@@ -107,6 +105,56 @@ class Attention_Block(nn.Module):
         attn_score_stable = torch.softmax(attn_score_stable, dim = -1)  # Softmax over the last dimension
         #attn_score = torch.softmax(attn_score, dim = -1)  # Softmax over the last dimension
         x_attn = torch.einsum('bhnm, bhmd -> bhnd', attn_score_stable, v)  # (B, num_heads, N, head_dim)
+
+        x_attn = rearrange(x_attn, 'b h n d -> b (h d) n')  # Reshape back to (B, C, N)
+        x_attn = self.out_projection(x_attn) # (B, C, N)
+        #x_attn = rearrange(x_attn, 'b c (h w) -> b c h w', h = height, w = width)  # Reshape back to (B, C, H, W)
+        x_attn = self.group_norm2(x_attn)  # Apply group normalization
+        x_attn = rearrange(x_attn, 'b c n -> b n c') # (B, N, C)
+        x_attn, gate = self.mlp1(x_attn).chunk(2, dim = -1)  # Split into two parts for gating
+        x_attn = self.activation(x_attn) * gate # SwiGLU activation
+        x_attn = self.mlp2(x_attn) # (B, N, C)
+
+        x_attn = rearrange(x_attn, 'b (h w) c -> b c h w', h = height, w = width)  # Reshape back to (B, C, H, W)
+
+        return x + x_attn # Skip connection to add input to output
+    
+class Flash_Attention_Block(nn.Module):
+    def __init__(self, channels: int, num_heads: int = 1, num_groups: int = 32):
+        super().__init__()
+        self.num_heads = num_heads
+        self.channels = channels
+        assert channels % num_heads == 0, "channels must be divisible by num_heads"
+        self.head_dim = channels // num_heads
+        self.hidden_dim = channels * 4 # Hidden dimension for feedforward network
+
+        self.group_norm1 = nn.GroupNorm(num_groups = num_groups, num_channels = channels)
+        self.qkv = nn.Conv1d(channels, channels * 3, kernel_size=1) # Linear is equivalent to Conv1d with kernel_size=1
+        self.out_projection = nn.Conv1d(channels, channels, kernel_size=1)
+
+        self.group_norm2 = nn.GroupNorm(num_groups=num_groups, num_channels=channels)
+        self.mlp1 = nn.Linear(channels, self.hidden_dim * 2, bias = False)
+        self.activation = nn.SiLU()
+        self.mlp2 = nn.Linear(self.hidden_dim, channels, bias = False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: input tensor (batch, channels, height, width)"""
+        batch, channels, height, width = x.shape
+        x_norm = self.group_norm1(x)  # Apply group normalization
+
+        x_norm = rearrange(x_norm, 'b c h w -> b c (h w)')  # Reshape to (B, C, N), N = H*W
+        qkv = self.qkv(x_norm) # (B, C*3, N) , query, key, value together
+        q, k, v = qkv.chunk(3, dim = 1)  # Split into query, key, value each of shape (B, C, N)
+
+        # reshape to (B, num_heads, head_dim, N)
+        q = rearrange(q, 'b (h d) n -> b h n d', h = self.num_heads, d = self.head_dim)
+        k = rearrange(k, 'b (h d) n -> b h n d', h = self.num_heads, d = self.head_dim)
+        v = rearrange(v, 'b (h d) n -> b h n d', h = self.num_heads, d = self.head_dim)
+
+        
+        # Compute attention scores
+        x_attn = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False) # Flash attention
+        # x_attn shape is (B, num_heads, N, head_dim)
 
         x_attn = rearrange(x_attn, 'b h n d -> b (h d) n')  # Reshape back to (B, C, N)
         x_attn = self.out_projection(x_attn) # (B, C, N)
@@ -285,55 +333,7 @@ class AddGaussianNoise(nn.Module):
         noisy_x = torch.sqrt(alpha_bar_t) * x + torch.sqrt(1 - alpha_bar_t) * noise
         return noisy_x, noise
     
-class Flash_Attention_Block(nn.Module):
-    def __init__(self, channels: int, num_heads: int = 1, num_groups: int = 32):
-        super().__init__()
-        self.num_heads = num_heads
-        self.channels = channels
-        assert channels % num_heads == 0, "channels must be divisible by num_heads"
-        self.head_dim = channels // num_heads
-        self.hidden_dim = channels * 4 # Hidden dimension for feedforward network
 
-        self.group_norm1 = nn.GroupNorm(num_groups = num_groups, num_channels = channels)
-        self.qkv = nn.Conv1d(channels, channels * 3, kernel_size=1) # Linear is equivalent to Conv1d with kernel_size=1
-        self.out_projection = nn.Conv1d(channels, channels, kernel_size=1)
-
-        self.group_norm2 = nn.GroupNorm(num_groups=num_groups, num_channels=channels)
-        self.mlp1 = nn.Linear(channels, self.hidden_dim * 2, bias = False)
-        self.activation = nn.SiLU()
-        self.mlp2 = nn.Linear(self.hidden_dim, channels, bias = False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: input tensor (batch, channels, height, width)"""
-        batch, channels, height, width = x.shape
-        x_norm = self.group_norm1(x)  # Apply group normalization
-
-        x_norm = rearrange(x_norm, 'b c h w -> b c (h w)')  # Reshape to (B, C, N), N = H*W
-        qkv = self.qkv(x_norm) # (B, C*3, N) , query, key, value together
-        q, k, v = qkv.chunk(3, dim = 1)  # Split into query, key, value each of shape (B, C, N)
-
-        # reshape to (B, num_heads, head_dim, N)
-        q = rearrange(q, 'b (h d) n -> b h n d', h = self.num_heads, d = self.head_dim)
-        k = rearrange(k, 'b (h d) n -> b h n d', h = self.num_heads, d = self.head_dim)
-        v = rearrange(v, 'b (h d) n -> b h n d', h = self.num_heads, d = self.head_dim)
-
-        
-        # Compute attention scores
-        x_attn = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False) # Flash attention
-        # x_attn shape is (B, num_heads, N, head_dim)
-
-        x_attn = rearrange(x_attn, 'b h n d -> b (h d) n')  # Reshape back to (B, C, N)
-        x_attn = self.out_projection(x_attn) # (B, C, N)
-        #x_attn = rearrange(x_attn, 'b c (h w) -> b c h w', h = height, w = width)  # Reshape back to (B, C, H, W)
-        x_attn = self.group_norm2(x_attn)  # Apply group normalization
-        x_attn = rearrange(x_attn, 'b c n -> b n c') # (B, N, C)
-        x_attn, gate = self.mlp1(x_attn).chunk(2, dim = -1)  # Split into two parts for gating
-        x_attn = self.activation(x_attn) * gate # SwiGLU activation
-        x_attn = self.mlp2(x_attn) # (B, N, C)
-
-        x_attn = rearrange(x_attn, 'b (h w) c -> b c h w', h = height, w = width)  # Reshape back to (B, C, H, W)
-
-        return x + x_attn # Skip connection to add input to output
 
 
 
