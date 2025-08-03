@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import AdamW
+from torch.optim import AdamW, Adam
 from einops import rearrange
 import tqdm
 import os
-from transformers import get_cosine_schedule_with_warmup 
+from transformers import get_cosine_schedule_with_warmup, get_linear_schedule_with_warmup
 
 from model import Unet, NoiseScheduler, AddGaussianNoise
 from cifar10_processing import load_cifar10, visualize_cifar10
@@ -14,9 +14,9 @@ import wandb
 
 # Define your experiment hyperparameters here
 params = {
-    "learning_rate": 1e-4,
-    "batch_size": 128,
-    "num_epochs": 20,  # Set to a lower value for testing
+    "learning_rate": 2e-4,
+    "batch_size": 256,
+    "num_epochs": 10,  # Set to a lower value for testing
     "weight_decay": 1e-2,
     "num_warmup_steps": 100,
     "optimizer": "AdamW",
@@ -24,13 +24,17 @@ params = {
 }
 
 wandb.init(project="ddpm-hyperparam-tuning", config=params)
-wandb.run.name = f"bs={params['batch_size']}-lr={params['learning_rate']:.0e}-wd={params['weight_decay']:.0e}-warmup={params['num_warmup_steps']}"
+wandb.run.name = f"""bs={params['batch_size']}-lr={params['learning_rate']:.0e}
+-wd={params['weight_decay']:.0e}-warmup={params['num_warmup_steps']}--optim={params['optimizer']}"""
 
-#wandb.init(project="ddpm-training-cifar10", config=params)  # Initialize wandb for logging
+# wandb.init(project="ddpm-training-cifar10", config=params)  # Initialize wandb for logging
+# wandb.run.name = f"""bs={wandb.config.batch_size}-lr={wandb.config.learning_rate:.0e}
+# -wd={wandb.config.weight_decay:.0e}-warmup={wandb.config.num_warmup_steps}--optim={wandb.config.optimizer}"""
 
 ## ----- Training Configuration ----- ##
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")  # For testing purposes, we can use CPU
+#device = torch.device("cpu")  # For testing purposes, we can use CPU
+scheduled_epoch = 100 
 print(f"Using device: {device}")
 #batch_size = 64  # Batch size for training
 #num_epoch = 50
@@ -49,7 +53,6 @@ hyperparam_tuning = True  # Set to True if you are tuning hyperparameters
 
 ## ----- Load Data ----- ##
 train_dataloader = load_cifar10(batch_size=batch_size)  # Load CIFAR-10 dataset
-num_training_steps = num_epoch * len(train_dataloader)  # Total number of training steps
 print(f"Number of batches in train_dataloader: {len(train_dataloader)}")  # Print number of batches
  
 ## ----- Initialize Model, Optimizer, and Scheduler ----- ##
@@ -62,10 +65,23 @@ loss_fn = F.mse_loss  # Mean Squared Error loss function
 lr = wandb.config.learning_rate  # Use learning rate from wandb config
 weight_decay = wandb.config.weight_decay  # Use weight decay from wandb config
 num_warmup_steps = wandb.config.num_warmup_steps  # Use number of warmup steps from wandb config
-optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)  # AdamW optimizer
+num_training_steps = scheduled_epoch * len(train_dataloader)  # Total number of training steps
+if params['optimizer'] == "AdamW":
+    print("Using AdamW optimizer")
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)  # AdamW optimizer
+else:
+    print("Using Adam optimizer")
+    optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)  # Adam optimizer
+
+
+# cosine scheduler with warmup
 lr_scheduler = get_cosine_schedule_with_warmup(optimizer, 
                                                num_warmup_steps=num_warmup_steps, 
                                                num_training_steps=num_training_steps)
+# linear scheduler
+#lr_scheduler = get_linear_schedule_with_warmup(optimizer,
+#                                               num_warmup_steps=num_warmup_steps, 
+#                                               num_training_steps=num_training_steps)
 
 ## ----- Load Checkpoint (if exists and resume_training is True) ----- ##
 start_epoch = 0
@@ -85,12 +101,12 @@ else:
 
 ## ----- Training Loop ----- ##
 
-print(f"""Starting training.\n
-      Number of epochs: {num_epoch}\n
-      Batch Size: {batch_size}\n
-      Learning Rate: {lr}\n
-      Weight Decay: {weight_decay}\n
-      Number of Warmup Steps: {num_warmup_steps}\n
+print(f"""Starting training.
+      Number of epochs: {num_epoch}
+      Batch Size: {batch_size}
+      Learning Rate: {lr}
+      Weight Decay: {weight_decay}
+      Number of Warmup Steps: {num_warmup_steps}
       """)
 if hyperparam_tuning:
     print("This is a hyperparameter tuning run. Results will be logged to wandb.")
