@@ -7,7 +7,7 @@ import tqdm
 import os
 from transformers import get_cosine_schedule_with_warmup, get_linear_schedule_with_warmup
 
-from model import Unet, NoiseScheduler, AddGaussianNoise
+from model import EMA, Unet, NoiseScheduler, AddGaussianNoise
 from cifar10_processing import load_cifar10, visualize_cifar10
 
 import wandb
@@ -57,6 +57,8 @@ print(f"Number of batches in train_dataloader: {len(train_dataloader)}")  # Prin
  
 ## ----- Initialize Model, Optimizer, and Scheduler ----- ##
 model = Unet().to(device)  # Initialize the Unet model
+ema_model = EMA(model, decay=0.99)  # Initialize EMA for model weights
+ema_model.to(device)  # Move EMA model to the device
 noise_scheduler = NoiseScheduler(num_diffusion_timesteps=num_diffusion_timesteps, device=device)  # Initialize noise scheduler
 add_noise = AddGaussianNoise()  # Initialize noise addition module
 loss_fn = F.mse_loss  # Mean Squared Error loss function
@@ -89,6 +91,7 @@ if resume_training and os.path.exists(checkpoint_path):
     print(f"Loading checkpoint from {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
+    ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
     start_epoch = checkpoint['epoch'] + 1
@@ -136,6 +139,9 @@ for epoch in range(start_epoch, num_epoch):
         loss.backward()  # Backpropagate the loss
         optimizer.step()  # Update model parameters
         lr_scheduler.step()  # Update learning rate
+        ema_model.update(model)  # Update EMA model weights
+        
+        # Update progress bar with loss
         progress_bar.set_postfix({"loss": loss.item()})
         loss_list.append(loss.item())
         track_train_loss.append(loss.item())  # Track training loss against each training step
@@ -153,6 +159,7 @@ for epoch in range(start_epoch, num_epoch):
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
+            'ema_model_state_dict': ema_model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'lr_scheduler_state_dict': lr_scheduler.state_dict(),
             'epoch_loss': epoch_loss,

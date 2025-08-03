@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchmetrics.image.inception import InceptionScore
 import cleanfid
 from tqdm import tqdm
+import json
 
 # === CONFIG ===
 image_folder = "ddpm_generated_images_epoch_100"
@@ -63,3 +64,9 @@ results = {
 
 print(f"\nResults Dictionary:")
 print(results)
+
+# Save results to file
+results_filename = f"ddpm_metric_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+with open(results_filename, 'w') as f:
+    json.dump(results, f, indent=2)
+print(f"Metric results saved to: {results_filename}")
