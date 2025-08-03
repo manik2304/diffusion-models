@@ -13,6 +13,8 @@ def load_cifar10(batch_size = 128):
         transforms.Lambda(lambda x: 2*x - 1) # Normalize the image to [-1,1]
     ])
 
+    print("Loading CIFAR-10 dataset...")
+    print("It will download the dataset if it is not already present.")
     train_dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 

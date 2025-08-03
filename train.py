@@ -10,11 +10,33 @@ from transformers import get_cosine_schedule_with_warmup
 from model import Unet, NoiseScheduler, AddGaussianNoise
 from cifar10_processing import load_cifar10, visualize_cifar10
 
+import wandb
+
+# Define your experiment hyperparameters here
+params = {
+    "learning_rate": 1e-4,
+    "batch_size": 128,
+    "num_epochs": 20,  # Set to a lower value for testing
+    "weight_decay": 1e-2,
+    "num_warmup_steps": 100,
+    "optimizer": "AdamW",
+    "lr_scheduler": "cosine_with_warmup",
+}
+
+wandb.init(project="ddpm-hyperparam-tuning", config=params)
+wandb.run.name = f"bs={params['batch_size']}-lr={params['learning_rate']:.0e}-wd={params['weight_decay']:.0e}-warmup={params['num_warmup_steps']}"
+
+#wandb.init(project="ddpm-training-cifar10", config=params)  # Initialize wandb for logging
+
 ## ----- Training Configuration ----- ##
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")  # For testing purposes, we can use CPU
-batch_size = 64  # Batch size for training
-num_epoch = 50
+print(f"Using device: {device}")
+#batch_size = 64  # Batch size for training
+#num_epoch = 50
+batch_size = wandb.config.batch_size  # Use batch size from wandb config
+num_epoch = wandb.config.num_epochs  # Use number of epochs from wandb config
+
 num_diffusion_timesteps = 1000 # Number of diffusion steps, standard for DDPM
 
 ## ----- Model Checkpoint Configuration ----- ##
@@ -22,6 +44,8 @@ checkpoint_dir = "checkpoints"
 os.makedirs(checkpoint_dir, exist_ok=True)
 checkpoint_path = os.path.join(checkpoint_dir, "ddpm_model.pth")
 resume_training = False  # Set to True if you want to resume from a checkpoint
+save_model = False  # Set to True if you want to save the model after training
+hyperparam_tuning = True  # Set to True if you are tuning hyperparameters
 
 ## ----- Load Data ----- ##
 train_dataloader = load_cifar10(batch_size=batch_size)  # Load CIFAR-10 dataset
@@ -33,8 +57,15 @@ model = Unet().to(device)  # Initialize the Unet model
 noise_scheduler = NoiseScheduler(num_diffusion_timesteps=num_diffusion_timesteps, device=device)  # Initialize noise scheduler
 add_noise = AddGaussianNoise()  # Initialize noise addition module
 loss_fn = F.mse_loss  # Mean Squared Error loss function
-optimizer = AdamW(model.parameters(), lr = 1e-4, weight_decay = 1e-2) # AdamW optimizer with learning rate 1e-4 and weight decay 1e-2
-lr_scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=100, num_training_steps=num_training_steps)
+
+## Initialize optimizer and learning rate scheduler
+lr = wandb.config.learning_rate  # Use learning rate from wandb config
+weight_decay = wandb.config.weight_decay  # Use weight decay from wandb config
+num_warmup_steps = wandb.config.num_warmup_steps  # Use number of warmup steps from wandb config
+optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)  # AdamW optimizer
+lr_scheduler = get_cosine_schedule_with_warmup(optimizer, 
+                                               num_warmup_steps=num_warmup_steps, 
+                                               num_training_steps=num_training_steps)
 
 ## ----- Load Checkpoint (if exists and resume_training is True) ----- ##
 start_epoch = 0
@@ -54,6 +85,17 @@ else:
 
 ## ----- Training Loop ----- ##
 
+print(f"""Starting training.\n
+      Number of epochs: {num_epoch}\n
+      Batch Size: {batch_size}\n
+      Learning Rate: {lr}\n
+      Weight Decay: {weight_decay}\n
+      Number of Warmup Steps: {num_warmup_steps}\n
+      """)
+if hyperparam_tuning:
+    print("This is a hyperparameter tuning run. Results will be logged to wandb.")
+else:
+    print("This is a standard training run. Results will be saved to the checkpoint file. Also wandb will log the training loss and learning rate.")
 
 for epoch in range(start_epoch, num_epoch):
     model.train()  # Set model to training mode
@@ -85,22 +127,25 @@ for epoch in range(start_epoch, num_epoch):
     epoch_loss = sum(loss_list) / len(loss_list)  # Calculate average loss for the epoch
     print(f"Epoch {epoch+1}/{num_epoch}, Average Loss: {epoch_loss:.4f}")  # Print average loss for the epoch
     
+    # Log epoch, training loss, and learning rate to wandb
+    wandb.log({
+        "epoch": epoch + 1,
+        "train_loss": epoch_loss,
+        "lr": optimizer.param_groups[0]["lr"]})
     ## ----- Save Model Checkpoint ----- ##
-    checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'lr_scheduler_state_dict': lr_scheduler.state_dict(),
-        'epoch_loss': epoch_loss,
-        'loss': track_train_loss,
-        'num_diffusion_timesteps': num_diffusion_timesteps,
-        'batch_size': batch_size
-    }
-    torch.save(checkpoint, checkpoint_path)
-    print(f"Model checkpoint saved to {checkpoint_path}")
+    if save_model == True:
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+            'epoch_loss': epoch_loss,
+            'loss': track_train_loss,
+            'num_diffusion_timesteps': num_diffusion_timesteps,
+            'batch_size': batch_size
+        }
+        torch.save(checkpoint, checkpoint_path)
+        print(f"Model checkpoint saved to {checkpoint_path}")
 
 print(f"Training completed for {epoch + 1} epochs.")
-
-
-
-
+wandb.finish()
