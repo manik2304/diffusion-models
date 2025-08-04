@@ -15,41 +15,39 @@ import wandb
 # Define your experiment hyperparameters here
 params = {
     "learning_rate": 2e-4,
-    "batch_size": 256,
-    "num_epochs": 10,  # Set to a lower value for testing
+    "batch_size": 128,
     "weight_decay": 1e-2,
-    "num_warmup_steps": 100,
-    "optimizer": "AdamW",
+    "num_warmup_steps": 200,
+    "optimizer": "Adam",
     "lr_scheduler": "cosine_with_warmup",
 }
 
-wandb.init(project="ddpm-hyperparam-tuning", config=params)
-wandb.run.name = f"""bs={params['batch_size']}-lr={params['learning_rate']:.0e}
--wd={params['weight_decay']:.0e}-warmup={params['num_warmup_steps']}--optim={params['optimizer']}"""
 
-# wandb.init(project="ddpm-training-cifar10", config=params)  # Initialize wandb for logging
-# wandb.run.name = f"""bs={wandb.config.batch_size}-lr={wandb.config.learning_rate:.0e}
-# -wd={wandb.config.weight_decay:.0e}-warmup={wandb.config.num_warmup_steps}--optim={wandb.config.optimizer}"""
+# wandb.init(project="ddpm-hyperparam-tuning", config=params)
+# wandb.run.name = f"""bs={params['batch_size']}-lr={params['learning_rate']:.0e}
+# -warmup={params['num_warmup_steps']}--optim={params['optimizer']}"""
+
+wandb.init(project="ddpm-training-cifar10", config=params)  # Initialize wandb for logging
+wandb.run.name = f"""bs={wandb.config.batch_size}-lr={wandb.config.learning_rate:.0e}
+-warmup={wandb.config.num_warmup_steps}--optim={wandb.config.optimizer}"""
+
 
 ## ----- Training Configuration ----- ##
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #device = torch.device("cpu")  # For testing purposes, we can use CPU
-scheduled_epoch = 100 
+num_epoch = 500
+scheduled_epoch = 500
 print(f"Using device: {device}")
-#batch_size = 64  # Batch size for training
-#num_epoch = 50
 batch_size = wandb.config.batch_size  # Use batch size from wandb config
-num_epoch = wandb.config.num_epochs  # Use number of epochs from wandb config
-
 num_diffusion_timesteps = 1000 # Number of diffusion steps, standard for DDPM
 
 ## ----- Model Checkpoint Configuration ----- ##
 checkpoint_dir = "checkpoints"
 os.makedirs(checkpoint_dir, exist_ok=True)
 checkpoint_path = os.path.join(checkpoint_dir, "ddpm_model.pth")
-resume_training = False  # Set to True if you want to resume from a checkpoint
-save_model = False  # Set to True if you want to save the model after training
-hyperparam_tuning = True  # Set to True if you are tuning hyperparameters
+resume_training = True  # Set to True if you want to resume from a checkpoint
+save_model = True  # Set to True if you want to save the model after training
+hyperparam_tuning = False  # Set to True if you are tuning hyperparameters
 
 ## ----- Load Data ----- ##
 train_dataloader = load_cifar10(batch_size=batch_size)  # Load CIFAR-10 dataset
@@ -64,16 +62,19 @@ add_noise = AddGaussianNoise()  # Initialize noise addition module
 loss_fn = F.mse_loss  # Mean Squared Error loss function
 
 ## Initialize optimizer and learning rate scheduler
-lr = wandb.config.learning_rate  # Use learning rate from wandb config
-weight_decay = wandb.config.weight_decay  # Use weight decay from wandb config
-num_warmup_steps = wandb.config.num_warmup_steps  # Use number of warmup steps from wandb config
+lr = params["learning_rate"]  # Use learning rate from wandb config
+weight_decay = params["weight_decay"]  # Use weight decay from wandb config
+num_warmup_steps = params["num_warmup_steps"]  # Use number of warmup steps from wandb config
 num_training_steps = scheduled_epoch * len(train_dataloader)  # Total number of training steps
 if params['optimizer'] == "AdamW":
     print("Using AdamW optimizer")
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)  # AdamW optimizer
-else:
+elif params['optimizer'] == "Adam":
     print("Using Adam optimizer")
-    optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)  # Adam optimizer
+    optimizer = Adam(model.parameters(), lr=lr, eps=1e-8)  # Adam optimizer
+else:
+    raise ValueError("No optimizer.")
+
 
 
 # cosine scheduler with warmup
@@ -87,6 +88,8 @@ lr_scheduler = get_cosine_schedule_with_warmup(optimizer,
 
 ## ----- Load Checkpoint (if exists and resume_training is True) ----- ##
 start_epoch = 0
+loss_history_path = os.path.join(checkpoint_dir, "training_loss.pth")
+
 if resume_training and os.path.exists(checkpoint_path):
     print(f"Loading checkpoint from {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -95,22 +98,27 @@ if resume_training and os.path.exists(checkpoint_path):
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
     start_epoch = checkpoint['epoch'] + 1
-    track_train_loss = checkpoint['loss']
+    prev_epoch_loss = checkpoint['epoch_loss'] # epoch loss from the checkpoint
+    track_train_loss = checkpoint['loss']  # Load training loss history from checkpoint if available
+    
+    # Load training loss history from separate file if it exists
+    if os.path.exists(loss_history_path):
+        loss_history = torch.load(loss_history_path, map_location=device)
+        track_train_loss = loss_history['loss']
+        print(f"Loaded training loss history with {len(track_train_loss)} steps")
+    else:
+        track_train_loss = checkpoint.get('loss', [])  # Fallback to checkpoint loss if available
+    
     print(f"Resumed training from epoch {start_epoch}")
 else:
     track_train_loss = []  # Initialize list to track training loss
     print("Starting training from scratch")
+    prev_epoch_loss = 10 # Initialize previous epoch loss to a high value
     
 
 ## ----- Training Loop ----- ##
 
-print(f"""Starting training.
-      Number of epochs: {num_epoch}
-      Batch Size: {batch_size}
-      Learning Rate: {lr}
-      Weight Decay: {weight_decay}
-      Number of Warmup Steps: {num_warmup_steps}
-      """)
+print("Starting training.")
 if hyperparam_tuning:
     print("This is a hyperparameter tuning run. Results will be logged to wandb.")
 else:
@@ -155,7 +163,19 @@ for epoch in range(start_epoch, num_epoch):
         "train_loss": epoch_loss,
         "lr": optimizer.param_groups[0]["lr"]})
     ## ----- Save Model Checkpoint ----- ##
-    if save_model == True:
+    
+    # Always save training loss history
+    loss_history_path = os.path.join(checkpoint_dir, "training_loss.pth")
+    torch.save({
+        'epoch': epoch,
+        'loss': track_train_loss,
+        'epoch_loss': epoch_loss
+    }, loss_history_path)
+        
+    if save_model == True and epoch_loss < prev_epoch_loss:
+        print(f"Saving model checkpoint at epoch {epoch + 1} with loss {epoch_loss:.4f}")
+        prev_epoch_loss = epoch_loss  # Update previous epoch loss to current
+        # Save the model checkpoint with complete training history
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
@@ -163,7 +183,7 @@ for epoch in range(start_epoch, num_epoch):
             'optimizer_state_dict': optimizer.state_dict(),
             'lr_scheduler_state_dict': lr_scheduler.state_dict(),
             'epoch_loss': epoch_loss,
-            'loss': track_train_loss,
+            'loss': track_train_loss,  # Always include complete training history
             'num_diffusion_timesteps': num_diffusion_timesteps,
             'batch_size': batch_size
         }

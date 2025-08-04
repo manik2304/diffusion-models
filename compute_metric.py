@@ -6,12 +6,12 @@ from torchvision.io import read_image
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
 from torchmetrics.image.inception import InceptionScore
-import cleanfid
+from cleanfid import fid
 from tqdm import tqdm
 import json
 
 # === CONFIG ===
-image_folder = "ddpm_generated_images_epoch_100"
+image_folder = "generated_images_ddpm_sampling_1000_timesteps"
 batch_size = 100
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -50,8 +50,14 @@ print(f"Inception Score: {inception_score:.2f} ± {inception_std:.2f}")
 
 # === FID Computation ===
 print("\nComputing FID...")
-fid_score = cleanfid.compute_fid(image_folder, dataset_name="cifar10", dataset_split="test")
-print(f"FID Score (vs CIFAR-10 test): {fid_score:.2f}")
+fid_score_train = fid.compute_fid(image_folder, dataset_name="cifar10", 
+dataset_res=32,  mode="clean", dataset_split="train")
+
+fid_score_test = fid.compute_fid(image_folder, dataset_name="cifar10", 
+dataset_res=32,  mode="clean", dataset_split="test")
+print(f"FID Score (Train): {fid_score_train:.2f}")
+print(f"FID Score (Test): {fid_score_test:.2f}")
+
 
 # === Save Results in Dictionary ===
 results = {
@@ -59,8 +65,10 @@ results = {
     "num_images": len(dataset),
     "inception_score": float(inception_score),
     "inception_std": float(inception_std),
-    "fid_score": float(fid_score),
+    "fid_score_train": float(fid_score_train),
+    "fid_score_test": float(fid_score_test)
 }
+
 
 print(f"\nResults Dictionary:")
 print(results)
